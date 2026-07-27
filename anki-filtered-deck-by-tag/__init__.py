@@ -1,19 +1,7 @@
-# Filtered Deck From Tag
+# Filtered Deck From Tag (Multi-tags Interactif avec Sélection Multiple)
 #
-# Copyright (C) 2022  Sachin Govind
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as
-# published by the Free Software Foundation, either version 3 of the
-# License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+# Copyright (C) 2022  Sachin Govind (Modifié pour sélection multiple dans les tags existants)
+# from https://github.com/sachingooo/anki-filtered-deck-by-tag/blob/main/anki-filtered-deck-by-tag/__init__.py
 
 from aqt import mw
 from aqt.qt import *
@@ -21,58 +9,113 @@ from aqt.utils import tooltip
 from anki.collection import SearchNode
 from aqt.browser import SidebarItem, SidebarTreeView, SidebarItemType
 from aqt.gui_hooks import browser_sidebar_will_show_context_menu
-from anki.consts import DYN_OLDEST, DYN_RANDOM, DYN_SMALLINT, DYN_BIGINT, DYN_LAPSES, DYN_ADDED, DYN_DUE, DYN_REVADDED, DYN_DUEPRIORITY
+from anki.consts import DYN_OLDEST, DYN_RANDOM, DYN_SMALLINT, DYN_BIGINT, DYN_LAPSES, DYN_ADDED, DYN_DUE, DYN_REVADDED, \
+    DYN_DUEPRIORITY
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from aqt.browser import SidebarTreeView  # type: ignore
 
-def _filteredDeckFromTag(sidebar: "SidebarTreeView",  menu: QMenu, item: SidebarItem, index: QModelIndex):
-    # Adds our option to the right click menu for tags in the deck browser
+
+class MultiTagSelectionDialog(QDialog):
+    """Fenêtre de dialogue personnalisée pour cocher plusieurs tags existants."""
+
+    def __init__(self, parent=None, tags=None):
+        super().__init__(parent)
+        self.setWindowTitle("Croiser avec d'autres tags")
+        self.setMinimumWidth(350)
+        self.setMinimumHeight(400)
+
+        self.selected_tags = []
+
+        layout = QVBoxLayout(self)
+
+        # Instruction
+        label = QLabel("Sélectionnez un ou plusieurs tags à croiser :")
+        layout.addWidget(label)
+
+        # Liste déroulante avec cases à cocher
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)  # Géré par les checkbox
+
+        if tags:
+            for tag in sorted(tags):
+                item = QListWidgetItem(tag)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked)
+                self.list_widget.addItem(item)
+
+        layout.addWidget(self.list_widget)
+
+        # Boutons de validation / annulation
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept_selection)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def accept_selection(self):
+        self.selected_tags = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                self.selected_tags.append(item.text())
+        self.accept()
+
+
+def _filteredDeckFromTag(sidebar: "SidebarTreeView", menu: QMenu, item: SidebarItem, index: QModelIndex):
+    # S'active uniquement sur un clic droit sur un tag dans la barre latérale
     if item.item_type == SidebarItemType.TAG:
         menu.addSeparator()
-        if len(config["supplementalSearchTexts"]) == 0:
-            menu.addAction("Create Filtered Deck",
-                           lambda: _createFilteredDeck(item, "", ""))
-        else:
-            for i in range(len(config["supplementalSearchTexts"])):
-                supplementalSearchText = config["supplementalSearchTexts"][i]
-                shortName = config["shortNames"][i]
-                caption = "Create Filtered Deck"
-                if shortName != "":
-                    caption += " - %s" % shortName
-                
-                menu.addAction(caption, lambda sst=supplementalSearchText, sn=shortName: _createFilteredDeck(item, sst, sn))
+        menu.addAction("Create Filtered Deck (Croiser avec tags existants...)",
+                       lambda: _promptAndCreateFilteredDeck(item))
 
 
-def _createFilteredDeck(item: SidebarItem, supplementalSearchText, shortName):
-    if not item.full_name or len(item.full_name) < 2:
+def _promptAndCreateFilteredDeck(item: SidebarItem):
+    if not item.full_name:
         return
 
     col = mw.col
-    if col is None:
-        raise Exception('collection is not available')
+    if not col:
+        return
 
-    search = col.build_search_string(SearchNode(tag=item.full_name))
-    search += " " + supplementalSearchText
-    deckName = _formatDeckNameFromTag(item.name)
-    if len(shortName) > 0:
-        deckName += " - %s" % shortName
+    # Récupérer tous les tags existants dans la collection Anki
+    all_tags = col.tags.all()
+
+    # Ouvrir la boîte de dialogue à choix multiples
+    dialog = MultiTagSelectionDialog(mw, all_tags)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return
+
+    chosen_tags = dialog.selected_tags
+
+    # Construction de la recherche Anki de base
+    search = f"tag:\"{item.full_name}\""
+
+    # Ajouter chaque tag supplémentaire sélectionné avec un opérateur ET (AND)
+    for t in chosen_tags:
+        search += f" tag:\"{t}\""
+
+    config = col.conf.get("dynFilterConfig", {})
+
+    # Nommage automatique du paquet filtré
+    deckName = _formatDeckNameFromTag(item.full_name)
+    if chosen_tags:
+        deckName += " + " + " + ".join(chosen_tags)
+
     numberCards = 300
-
-    # modifications based on config
     if config:
-        if config["numCards"] > 0:
+        if config.get("numCards", 0) > 0:
             numberCards = config["numCards"]
-        if config["unsuspendAutomatically"]:
+        if config.get("unsuspendAutomatically"):
             cidsToUnsuspend = col.find_cards(search)
             col.sched.unsuspend_cards(cidsToUnsuspend)
 
-    defaultOrder = config["defaultOrder"]
-    if defaultOrder not in [DYN_OLDEST, DYN_RANDOM, DYN_SMALLINT, DYN_BIGINT, DYN_LAPSES, DYN_ADDED, DYN_DUE, DYN_REVADDED, DYN_DUEPRIORITY]:
+    defaultOrder = config.get("defaultOrder", DYN_DUE)
+    if defaultOrder not in [DYN_OLDEST, DYN_RANDOM, DYN_SMALLINT, DYN_BIGINT, DYN_LAPSES, DYN_ADDED, DYN_DUE,
+                            DYN_REVADDED, DYN_DUEPRIORITY]:
         defaultOrder = DYN_DUE
-    
+
     mw.progress.start()
     did = col.decks.new_filtered(deckName)
     deck = col.decks.get(did)
@@ -81,33 +124,15 @@ def _createFilteredDeck(item: SidebarItem, supplementalSearchText, shortName):
     col.sched.rebuildDyn(did)
     mw.progress.finish()
     mw.reset()
-    tooltip("Created filtered deck from tag %s " % (item.name))
+    tooltip("Paquet filtré créé : %s" % (deckName))
+
 
 def _formatDeckNameFromTag(tagName: str):
-    # Make the deck name readable
     pieces = tagName.split("_")
     if len(pieces) == 1:
-        return tagName
-    if pieces[0].isnumeric():
-        pieces.pop(0)
+        return pieces[0].capitalize()
+    return " ".join([p.capitalize() for p in pieces])
 
-    return " ".join(pieces)
 
-def updateLegacyConfig():
-    config = mw.addonManager.getConfig(__name__)
-    updatedConfig = config.copy()
-    if "supplementalSearchText" in config and "supplementalSearchTexts" not in config: #haven't done the update on this config yet
-        updatedConfig["supplementalSearchTexts"] = [config["supplementalSearchText"]]
-        del updatedConfig["supplementalSearchText"]
-        tooltip(str(updatedConfig))
-        updatedConfig["shortNames"] = [""]
-        mw.addonManager.writeConfig(__name__, {})
-        mw.addonManager.writeConfig(__name__, updatedConfig)
-
-    return updatedConfig
-
-config = updateLegacyConfig()
-assert len(config["supplementalSearchTexts"]) == len(config["shortNames"]), "Length of supplementalSearchTexts and shortNames are not the same in Filtered Deck From Tag addon configuration."
-
-# Append our option to the context menu
+# Enregistrement du hook pour afficher l'option dans le menu contextuel du navigateur
 browser_sidebar_will_show_context_menu.append(_filteredDeckFromTag)
